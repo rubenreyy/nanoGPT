@@ -1,68 +1,82 @@
-"""
-Prepare the Shakespeare dataset for character-level language modeling.
-So instead of encoding with GPT-2 BPE tokens, we just map characters to ints.
-Will save train.bin, val.bin containing the ids, and meta.pkl containing the
-encoder and decoder and some other related info.
-"""
-import os
-import pickle
-import requests
+import pandas as pd
 import numpy as np
+import torch
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
+import os
 
-# download the tiny shakespeare dataset
-input_file_path = os.path.join(os.path.dirname(__file__), 'input.txt')
-if not os.path.exists(input_file_path):
-    data_url = 'https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt'
-    with open(input_file_path, 'w') as f:
-        f.write(requests.get(data_url).text)
+# Define the columns for the KDD Cup dataset
+columns = [
+    "duration", "protocol_type", "service", "flag", "src_bytes", "dst_bytes",
+    "land", "wrong_fragment", "urgent", "hot", "num_failed_logins", "logged_in",
+    "num_compromised", "root_shell", "su_attempted", "num_root", "num_file_creations",
+    "num_shells", "num_access_files", "num_outbound_cmds", "is_host_login",
+    "is_guest_login", "count", "srv_count", "serror_rate", "srv_serror_rate",
+    "rerror_rate", "srv_rerror_rate", "same_srv_rate", "diff_srv_rate",
+    "srv_diff_host_rate", "dst_host_count", "dst_host_srv_count",
+    "dst_host_same_srv_rate", "dst_host_diff_srv_rate", "dst_host_same_src_port_rate",
+    "dst_host_srv_diff_host_rate", "dst_host_serror_rate", "dst_host_srv_serror_rate",
+    "dst_host_rerror_rate", "dst_host_srv_rerror_rate", "attack", "last_flag"
+]
 
-with open(input_file_path, 'r') as f:
-    data = f.read()
-print(f"length of dataset in characters: {len(data):,}")
+def preprocess_data(data, encoder=None, train_encoded_shape=None):
+    # Preprocess categorical features
+    nominal_features = ['protocol_type', 'service', 'flag']
+    
+    # Fit the encoder only on training data, but transform both train and test
+    if encoder is None:
+        encoder = OneHotEncoder(sparse_output=False, handle_unknown='ignore')
+        encoded_features = encoder.fit_transform(data[nominal_features])
+        train_encoded_shape = encoded_features.shape  # Capture the shape of training data encoded features
+    else:
+        encoded_features = encoder.transform(data[nominal_features])
+        
+        # Ensure test data has the same number of encoded columns as train data
+        if encoded_features.shape[1] < train_encoded_shape[1]:
+            # Add zero columns for missing categories in test data
+            missing_cols = train_encoded_shape[1] - encoded_features.shape[1]
+            encoded_features = np.hstack([encoded_features, np.zeros((encoded_features.shape[0], missing_cols))])
 
-# get all the unique characters that occur in this text
-chars = sorted(list(set(data)))
-vocab_size = len(chars)
-print("all the unique characters:", ''.join(chars))
-print(f"vocab size: {vocab_size:,}")
+    # Preprocess numerical features
+    scaler = StandardScaler()
+    numerical_features = [
+        'duration', 'src_bytes', 'dst_bytes', 'wrong_fragment', 'urgent',
+        # (other numerical features here)
+    ]
+    scaled_numerical = scaler.fit_transform(data[numerical_features])
+    
+    # Combine features
+    processed_data = np.hstack((encoded_features, scaled_numerical))
+    
+    # Define target variable for binary classification
+    data['target'] = data['attack'].apply(lambda x: 0 if x == 'normal' else 1)
+    
+    # Convert to PyTorch tensors
+    X = torch.tensor(processed_data, dtype=torch.float32)
+    y = torch.tensor(data['target'].values, dtype=torch.float32)
+    
+    return X, y, encoder, train_encoded_shape
 
-# create a mapping from characters to integers
-stoi = { ch:i for i,ch in enumerate(chars) }
-itos = { i:ch for i,ch in enumerate(chars) }
-def encode(s):
-    return [stoi[c] for c in s] # encoder: take a string, output a list of integers
-def decode(l):
-    return ''.join([itos[i] for i in l]) # decoder: take a list of integers, output a string
+if __name__ == "__main__":
+    train_filepath = r'c:\Users\Ruben\Networks\NanoGPT Toy experiment\nanoGPT\data\shakespeare_char\Train.txt'
+    test_filepath = r'c:\Users\Ruben\Networks\NanoGPT Toy experiment\nanoGPT\data\shakespeare_char\Test.txt'
 
-# create the train and test splits
-n = len(data)
-train_data = data[:int(n*0.9)]
-val_data = data[int(n*0.9):]
+    if os.path.exists(train_filepath) and os.path.exists(test_filepath):
+        print("Both train and test files found.")
+        
+        # Preprocess train data and save encoder
+        train_data = pd.read_csv(train_filepath, names=columns)
+        X_train, y_train, encoder, train_encoded_shape = preprocess_data(train_data)
 
-# encode both to integers
-train_ids = encode(train_data)
-val_ids = encode(val_data)
-print(f"train has {len(train_ids):,} tokens")
-print(f"val has {len(val_ids):,} tokens")
+        # Preprocess test data using the same encoder and ensure shape consistency
+        test_data = pd.read_csv(test_filepath, names=columns)
+        X_test, y_test, _, _ = preprocess_data(test_data, encoder, train_encoded_shape)
 
-# export to bin files
-train_ids = np.array(train_ids, dtype=np.uint16)
-val_ids = np.array(val_ids, dtype=np.uint16)
-train_ids.tofile(os.path.join(os.path.dirname(__file__), 'train.bin'))
-val_ids.tofile(os.path.join(os.path.dirname(__file__), 'val.bin'))
+        # Save the processed data as PyTorch tensors
+        torch.save(X_train, 'X_train.pt')
+        torch.save(y_train, 'y_train.pt')
+        torch.save(X_test, 'X_test.pt')
+        torch.save(y_test, 'y_test.pt')
 
-# save the meta information as well, to help us encode/decode later
-meta = {
-    'vocab_size': vocab_size,
-    'itos': itos,
-    'stoi': stoi,
-}
-with open(os.path.join(os.path.dirname(__file__), 'meta.pkl'), 'wb') as f:
-    pickle.dump(meta, f)
-
-# length of dataset in characters:  1115394
-# all the unique characters:
-#  !$&',-.3:;?ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz
-# vocab size: 65
-# train has 1003854 tokens
-# val has 111540 tokens
+        print("Processed data saved as .pt files.")
+    else:
+        print("One or both files not found.")
